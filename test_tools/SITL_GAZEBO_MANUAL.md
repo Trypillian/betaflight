@@ -8,7 +8,47 @@ in the `gz-env` distrobox.
 
 ---
 
-## What you are wiring together
+## Quick start
+
+`sim.sh` does everything below for you. Once:
+
+```sh
+./test_tools/sim.sh setup
+```
+
+Builds the firmware, fetches and builds the Gazebo plugin at the revision
+Betaflight pins, and provisions `~/.betaflight-sim/eeprom.bin` with ARM on AUX1 —
+so Configurator is not needed to get airborne. Every step checks before acting, so
+re-running it is free and doubles as a repair command.
+
+Then, every time:
+
+```sh
+./test_tools/sim.sh up          # Gazebo + SITL + RC bridge in one tmux session
+./test_tools/sim.sh status      # what is running, which ports are bound
+./test_tools/sim.sh down        # stop everything
+```
+
+Useful flags: `--headless` (no Gazebo window), `--no-rc`, `--world <name>`, and
+`--` to pass the rest through to the RC bridge — `sim.sh up -- --invert 2`.
+Overridable by environment: `AEROLOOP_DIR`, `RUN_DIR`, `SESSION`, `WORLD`.
+
+The panes are generated as plain scripts in `~/.betaflight-sim/` (`gazebo.sh`,
+`sitl.sh`, `rc.sh`), so when one misbehaves you can run it by hand. Dead panes stay
+visible rather than vanishing with the error.
+
+> **Start the RC bridge with everything else.** If SITL runs for a while with no RC
+> frames it latches `FAILSAFE`, and arming stays blocked even after RC comes back.
+> `sim.sh up` handles the ordering; `--no-rc` deliberately does not.
+
+Everything from here down is the same thing done by hand — worth reading when the
+script's assumptions break.
+
+---
+
+## Doing it by hand
+
+### What you are wiring together
 
 Four processes talk over loopback sockets. Betaflight computes motor outputs and
 ships them to Gazebo; Gazebo runs the physics and ships back the aircraft state;
@@ -29,7 +69,7 @@ as receiver loss and triggers failsafe.
 
 ---
 
-## 1. Build the firmware
+### 1. Build the firmware
 
 SITL is an ordinary make target, not a special mode. It needs **no ARM toolchain** —
 `src/platform/SIMULATOR/mk/SITL.mk` sets `PLATFORM_SDK := none`, so
@@ -52,7 +92,7 @@ simulated quad is a props-in airframe, and `USE_FLIGHT_PLAN`.
 
 ---
 
-## 2. Build the Gazebo bridge plugin
+### 2. Build the Gazebo bridge plugin
 
 Gazebo does not speak Betaflight's protocol on its own. The `BetaflightPlugin`
 system plugin from `betaflight/aeroloop_gazebo` binds UDP 9002, converts motor PWM
@@ -82,7 +122,7 @@ directory, so the clone is visible inside and outside the container.
 
 ---
 
-## 3. Start Gazebo
+### 3. Start Gazebo
 
 Start the simulator **first**, so the plugin owns port 9002 before Betaflight begins
 transmitting to it. Fly `worlds/test_betaflight.sdf` — it includes
@@ -108,7 +148,7 @@ you forgot to close.
 
 ---
 
-## 4. Start Betaflight
+### 4. Start Betaflight
 
 Run the binary from a scratch directory. On first start it writes a 32 KB
 `eeprom.bin` into the working directory — that file is your saved configuration, and
@@ -139,7 +179,7 @@ Useful flags:
 
 ---
 
-## 5. Connect your transmitter
+### 5. Connect your transmitter
 
 SITL takes RC over UDP 9004 as a 40-byte frame: a little-endian `double` timestamp
 followed by sixteen `uint16` channels in microseconds, in **AETR** order.
@@ -176,7 +216,7 @@ AUX1–4. Remap if your radio differs, and invert throttle if it runs backwards:
 
 ---
 
-## 6. Arm and fly
+### 6. Arm and fly
 
 Betaflight will not arm without a switch assigned to the ARM mode. Point Betaflight
 Configurator at **127.0.0.1:5761** using its manual TCP connection, assign ARM to an
@@ -203,7 +243,7 @@ harmless, but it logs nothing useful until the simulator answers on 9003.
 
 ---
 
-## Port map
+### Port map
 
 Every hop is loopback. Nothing is exposed off the machine unless you pass `--ip`.
 
@@ -242,6 +282,11 @@ Betaflight logged the first frame — it prints
 `[SITL] new rc 40: … AETR: 1500 1500 1000 1500`. If that line never appears, nothing
 is reaching port 9004.
 
+**It will not arm, and the reason is `FAILSAFE`.**
+Betaflight latches failsafe after a spell with no RC frames, and it stays latched
+after the frames return. Restart SITL with the RC bridge already streaming —
+`sim.sh down && sim.sh up` does that in the right order.
+
 **`failed to bind with 127.0.0.1:9002`.**
 The plugin could not take its port, so it aborts and you get a world with no
 Betaflight link. Another Gazebo is still alive — find it with
@@ -255,18 +300,31 @@ container it is still first on `PATH`, so it calls itself. Use `/usr/bin/gz`.
 
 ## What was actually tested
 
-Which parts of this were run end to end, and which were read out of the source —
-the difference matters the first time something misbehaves.
+Which parts were run end to end, and which were read out of the source — the
+difference matters the first time something misbehaves.
 
-- **Verified by running it:** the firmware build; the binary starting and claiming
-  UDP 9003, UDP 9004 and TCP 5761; and RC ingestion — a hand-built 40-byte frame
-  produced `[SITL] new rc 40: … AETR: 1500 1500 1000 1500 AUX1-4: 1000 1000 1000 1000`,
-  confirming the bridge's packet format and channel order against the real binary.
-- **Verified by reading the source:** the plugin's 9002/9003 bindings, the world and
-  model that carry `BetaflightPlugin`, the pinned commit, and `gz-env` having every
-  build dependency.
-- **Not yet run:** the plugin build, the Gazebo session, arming, and flight. No
-  transmitter was attached, so the joystick path is untested against real hardware.
+**Run and confirmed working:**
+
+- `sim.sh setup` — run twice back to back; the second run skipped every step.
+- `sim.sh up --headless --no-rc` — Gazebo started inside `gz-env` with the plugin
+  loaded, and the plugin logged `Betaflight controller online detected`, which means
+  motor packets were reaching it over UDP 9002.
+- The FDM return path is live: reported altitude moved across `0.02 m … −2.80 m`
+  in response to physics, so 9003 is flowing.
+- RC over UDP 9004 — a synthetic 50 Hz stream cleared `Arming disabled: RXLOSS`,
+  confirming the 40-byte frame format and AETR channel order against the real binary.
+- `sim.sh down` — killed the session and freed all four ports; `status` then showed
+  everything unbound.
+
+**Read from the source, not executed:** the pinned plugin revision, and the fact
+that `worlds/test_betaflight.sdf` is the only world pulling in a model that carries
+`BetaflightPlugin`.
+
+**Still unproven: that it actually flies.** Arming was blocked throughout by
+`FAILSAFE`, latched during the no-RC startup, so the quad never left the ground
+under power. No transmitter was attached either, so the joystick half of the bridge
+is untested against real hardware — only the UDP half is proven. Expect to iterate
+once on your first real session.
 
 > **Stale doc warning.** The in-tree `src/platform/SIMULATOR/target/SITL/README.md`
 > still describes Gazebo 8 on Ubuntu 16.04, points at a path that moved to

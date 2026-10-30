@@ -1,0 +1,4 @@
+# Default SITL provisioning, applied once with --config.
+# ARM on AUX1 (RC channel 5) above 1700.
+aux 0 0 0 1700 2100 0 0
+save
