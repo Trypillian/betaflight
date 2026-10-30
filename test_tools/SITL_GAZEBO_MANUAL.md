@@ -46,6 +46,47 @@ script's assumptions break.
 
 ---
 
+## The world
+
+`sim.sh up` loads `test_tools/worlds/flight_park.sdf` by default — an outdoor
+practice field with rolling terrain, a gate course, pylons, containers and trees.
+Everything is generated locally by `test_tools/make_world_assets.py`; there are no
+Fuel downloads and no imported meshes.
+
+```sh
+./test_tools/make_world_assets.py        # regenerate terrain, textures, world
+./test_tools/sim.sh up --world test_betaflight.sdf   # the plain grey plane
+```
+
+It is built for integrated graphics. Realism comes from lighting and scale cues
+rather than polygon count:
+
+| Choice | Why |
+| --- | --- |
+| Sky and tuned ambient light | The single biggest perceived-realism win, at almost no cost |
+| 257×257 heightmap, 240 m across, 7 m relief | Real ground relief; terrain LOD handles the draw cost |
+| Three 512×512 tiling textures, blended by height | Grass low, dirt mid, rock high — one material, no texture churn |
+| Every prop a primitive | Boxes, cylinders and spheres cost a fraction of a mesh and need no files |
+| Every prop `static` | Static bodies are skipped by the physics integrator entirely |
+| Shadows cast only by trees and containers | Shadow casting is the main GPU cost; small props opt out |
+| One directional light | A second shadow-casting light roughly doubles that cost |
+| Grid off | A debug grid reads as a test harness, not a place |
+
+The centre of the terrain is deliberately flattened into a level pad, fading back
+into the hills, so the quad spawns and lands on flat ground with no step in the
+collision surface.
+
+**Why the props matter for flying, not just for looks:** over a featureless plane
+you cannot judge height, speed or drift. The pylons give close-range speed cues,
+the gates give a course, and the trees and containers give the parallax you need
+to fly anything other than straight up.
+
+Measured on Intel Arrow Lake integrated graphics: headless real-time factor
+**1.00**, so the terrain and props add no measurable physics cost. GPU cost with
+the window open was not measured — that one needs your eyes.
+
+---
+
 ## Doing it by hand
 
 ### What you are wiring together

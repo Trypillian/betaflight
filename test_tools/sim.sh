@@ -21,7 +21,8 @@ REPO=$(cd "$SCRIPT_DIR/.." && pwd)
 AEROLOOP_DIR=${AEROLOOP_DIR:-$HOME/dev/aeroloop_gazebo}
 RUN_DIR=${RUN_DIR:-$HOME/.betaflight-sim}
 SESSION=${SESSION:-bfsim}
-WORLD=${WORLD:-test_betaflight.sdf}
+WORLD=${WORLD:-flight_park.sdf}
+WORLDS_DIR=$SCRIPT_DIR/worlds
 BOX=${BOX:-gz-env}
 
 BINARY=$REPO/obj/main/betaflight_SITL_SITL_GAZEBO.elf
@@ -147,14 +148,22 @@ cmd_up() {
 
     # Pane commands live in their own scripts: no nested quoting, and each one
     # can be re-run by hand when a pane misbehaves.
+    # Worlds resolve from our own dir first, then the plugin repo's.
+    local world_path
+    if   [[ -f $WORLDS_DIR/$WORLD   ]]; then world_path=$WORLDS_DIR/$WORLD
+    elif [[ -f $AEROLOOP_DIR/worlds/$WORLD ]]; then world_path=$AEROLOOP_DIR/worlds/$WORLD
+    elif [[ -f $WORLD ]]; then world_path=$(cd "$(dirname "$WORLD")" && pwd)/$(basename "$WORLD")
+    else need "world '$WORLD' not found in $WORLDS_DIR or $AEROLOOP_DIR/worlds"
+    fi
+
     cat > "$RUN_DIR/gazebo.sh" <<EOF
 #!/usr/bin/env bash
 cd "$AEROLOOP_DIR"
-export SDF_PATH="\$PWD/models:\${SDF_PATH:-}"
-export GZ_SIM_RESOURCE_PATH="\$PWD/worlds:\${GZ_SIM_RESOURCE_PATH:-}"
+export SDF_PATH="$WORLDS_DIR/models:\$PWD/models:\${SDF_PATH:-}"
+export GZ_SIM_RESOURCE_PATH="$WORLDS_DIR/models:$WORLDS_DIR:\$PWD/worlds:\${GZ_SIM_RESOURCE_PATH:-}"
 export GZ_SIM_SYSTEM_PLUGIN_PATH="\$PWD/plugins/build:\${GZ_SIM_SYSTEM_PLUGIN_PATH:-}"
 # absolute path: ~/.local/bin/gz is a distrobox wrapper and would recurse here
-exec /usr/bin/gz sim -r -v 4 $headless "worlds/$WORLD"
+exec /usr/bin/gz sim -r -v 4 $headless "$world_path"
 EOF
 
     cat > "$RUN_DIR/sitl.sh" <<EOF
