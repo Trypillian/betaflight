@@ -2,7 +2,7 @@
 #
 # One-command Betaflight SITL + Gazebo bring-up.
 #
-#   sim.sh setup     one-time: build firmware, fetch and build the Gazebo plugin,
+#   sim.sh setup     one-time: build firmware, fetch/patch/build the Gazebo plugin,
 #                    provision the EEPROM. Idempotent — safe to re-run as a repair.
 #   sim.sh up        start Gazebo, SITL and the RC bridge in a tmux session.
 #   sim.sh down      stop the session and any stragglers holding the sim ports.
@@ -31,6 +31,7 @@ CONTAINERFILE=$REPO/.devcontainer/containerfile.gazebo
 ARM_CFG=$SCRIPT_DIR/arm.txt
 RC_BRIDGE=$SCRIPT_DIR/rc_joystick_bridge.py
 AEROLOOP_URL=https://github.com/betaflight/aeroloop_gazebo.git
+PLUGIN_PATCH=$SCRIPT_DIR/betaflight-plugin-always-send-state.patch
 
 # ports: 9002 SITL->Gazebo, 9003 Gazebo->SITL, 9004 RC->SITL, 5761 MSP
 SIM_UDP_PORTS=(9002 9003 9004)
@@ -77,14 +78,42 @@ cmd_setup() {
     fi
     if [[ $(git -C "$AEROLOOP_DIR" rev-parse HEAD) != "$ref" ]]; then
         say "checkout" "aeroloop_gazebo @ ${ref:0:12}"
+        # our patch lives in the working tree, so drop it first or the checkout
+        # collides with it; step 3 puts it straight back on the new ref
+        if git -C "$AEROLOOP_DIR" apply --check --reverse -p1 "$PLUGIN_PATCH" 2>/dev/null; then
+            git -C "$AEROLOOP_DIR" apply --reverse -p1 "$PLUGIN_PATCH"
+        fi
         git -C "$AEROLOOP_DIR" fetch --quiet origin
         git -C "$AEROLOOP_DIR" checkout --quiet "$ref"
     else
         skip "aeroloop_gazebo already at ${ref:0:12}"
     fi
 
-    # 3. plugin binary, built inside the container that has the gz headers
-    if [[ ! -f $PLUGIN_SO ]]; then
+    # 3. the one local fix we carry on top of the pinned ref: without it a
+    #    dropped Betaflight link can never recover. See the patch for why.
+    local patched=0
+    if git -C "$AEROLOOP_DIR" apply --check --reverse -p1 "$PLUGIN_PATCH" 2>/dev/null; then
+        skip "plugin patch already applied"
+    elif git -C "$AEROLOOP_DIR" apply -p1 "$PLUGIN_PATCH" 2>/dev/null; then
+        say "patch" "$(basename "$PLUGIN_PATCH")"
+        patched=1
+    else
+        die "cannot apply $(basename "$PLUGIN_PATCH") to aeroloop_gazebo @ ${ref:0:12};
+       the pinned ref may have moved out from under it, or the clone has
+       conflicting local edits: git -C $AEROLOOP_DIR diff"
+    fi
+
+    # 4. plugin binary, built inside the container that has the gz headers.
+    #    Rebuild whenever the sources moved, or a stale .so silently outlives
+    #    the patch above.
+    local plugin_src_newer=""
+    if [[ -f $PLUGIN_SO ]]; then
+        plugin_src_newer=$(find "$AEROLOOP_DIR/plugins" -maxdepth 1 -type f \
+            \( -name '*.cc' -o -name '*.hh' -o -name 'CMakeLists.txt' \) \
+            -newer "$PLUGIN_SO" -print -quit 2>/dev/null)
+    fi
+
+    if [[ ! -f $PLUGIN_SO ]] || (( patched )) || [[ -n $plugin_src_newer ]]; then
         say "build" "BetaflightPlugin inside $BOX"
         in_box "set -e
                 cd '$AEROLOOP_DIR/plugins'
@@ -95,7 +124,7 @@ cmd_setup() {
         skip "BetaflightPlugin already built"
     fi
 
-    # 4. EEPROM, provisioned headlessly so Configurator is not needed to arm
+    # 5. EEPROM, provisioned headlessly so Configurator is not needed to arm
     mkdir -p "$RUN_DIR"
     if [[ ! -f $RUN_DIR/eeprom.bin ]]; then
         say "provision" "eeprom.bin from $(basename "$ARM_CFG")"
@@ -115,7 +144,13 @@ cmd_setup() {
 # ---------------------------------------------------------------- up
 
 cmd_up() {
-    local headless="" with_rc=1 rc_args=()
+    local headless="" with_rc=1
+    # Per-radio bridge options you should not have to retype every session —
+    # axis map, stick inversions. Export it from your shell profile, e.g.
+    #   export RC_ARGS='--invert 0,1'    # RadioMaster TX16S: roll and pitch reversed
+    # Anything after a literal -- on the command line replaces it.
+    local rc_args=()
+    [[ -n ${RC_ARGS:-} ]] && read -ra rc_args <<<"$RC_ARGS"
     while [[ $# -gt 0 ]]; do
         case $1 in
             --headless) headless="-s --headless-rendering"; shift ;;
