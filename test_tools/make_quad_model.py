@@ -40,9 +40,33 @@ BATTERY = "0.09 0.09 0.13"
 LABEL = "0.72 0.60 0.10"
 LENS = "0.05 0.07 0.10"
 
-# (motor number, x sign, y sign, direction). Preserved from test_quad.
-ROTORS = [(0, +1, -1, "ccw"), (1, -1, +1, "ccw"),
-          (2, +1, +1, "cw"), (3, -1, -1, "cw")]
+# Betaflight's QuadX mixer (src/main/flight/mixer_init.c, mixerQuadX[]) fixes
+# both the order of the four motors and which way each one turns:
+#
+#   BF motor  position      roll  pitch  yaw   spin
+#   0         rear-right     -1    +1    -1    cw
+#   1         front-right    -1    -1    +1    ccw
+#   2         rear-left      +1    +1    +1    ccw
+#   3         front-left     +1    -1    -1    cw
+#
+# The plugin hands motor_speed[i] to the i-th <rotor> element in *document
+# order* (BetaflightPlugin.cc: `rotors[i].cmd = ... pkt.motorSpeed[i]`). Both
+# the id attribute and <motorNumber> are ignored — <motorNumber> does not
+# appear anywhere in the plugin source — so this list's order is the mapping.
+#
+# aeroloop's models get this wrong: betaloop_iris carries a comment stating
+# BF[0]=REAR_R -> rotor_3_joint, but wires motorSpeed[0] to rotor_0_joint,
+# its *front*-right rotor. test_quad copied the wiring, and with it a layout
+# that yields no roll authority at all under the QuadX mixer. Do not "restore"
+# it to match those models.
+#
+# Model frame is FLU: +x forward (the camera end), +y left, +z up.
+#
+# (BF motor index, x sign, y sign, turning direction)
+ROTORS = [(0, -1, -1, "cw"),      # rear-right
+          (1, +1, -1, "ccw"),     # front-right
+          (2, -1, +1, "ccw"),     # rear-left
+          (3, +1, +1, "cw")]      # front-left
 
 
 def vis(name, pose, geom, rgb, shadows=True):
@@ -176,8 +200,14 @@ def imu():
     acc = "".join(f"""
             <{a}><noise type="gaussian"><mean>0.0</mean>
               <stddev>1.7e-2</stddev></noise></{a}>""" for a in "xyz")
+    # src/platform/SIMULATOR/sitl_gyro.h: Betaflight reads the simulator's
+    # angular velocity expecting the IMU *sensor* frame to be FRD, which it
+    # gets from a sensor pose of Rx(pi) against the FLU body link. Without
+    # this rotation pitch and yaw both arrive inverted. betaloop_iris has it;
+    # test_quad does not, which is where quad10 originally lost it.
     return f"""
       <sensor name="imu_sensor" type="imu">
+        <pose>0 0 0 3.141593 0 0</pose>
         <always_on>1</always_on>
         <update_rate>400</update_rate>
         <imu>
