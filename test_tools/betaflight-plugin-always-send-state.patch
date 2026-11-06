@@ -1,0 +1,35 @@
+Always publish simulator state, even while the Betaflight link is down.
+
+SendState() was gated on betaflightOnline, which is only set by receiving a
+motor packet. Betaflight SITL is strictly reactive: measured in isolation it
+emits exactly one unprompted motor packet at startup and thereafter one packet
+per FDM packet received. So once the plugin misses connectionTimeoutMaxCount
+motor packets it stops sending state, SITL stops responding, and neither side
+can restart the other -- the link deadlocks permanently.
+
+Publishing state unconditionally costs one UDP datagram per step when nothing
+is listening and lets a dropped link recover on its own. Motor forces stay
+gated so stale commands are not applied while offline.
+
+diff --git a/plugins/BetaflightPlugin.cc b/plugins/BetaflightPlugin.cc
+index 2725828..039c509 100644
+--- a/plugins/BetaflightPlugin.cc
++++ b/plugins/BetaflightPlugin.cc
+@@ -580,12 +580,15 @@ void BetaflightPluginPrivate::OnUpdate(EntityComponentManager &_ecm,
+   if (_simTime > this->lastControllerUpdateTime)
+   {
+     this->ReceiveMotorCommand();
++    auto dt = std::chrono::duration<double>(
++        _simTime - this->lastControllerUpdateTime).count();
+     if (this->betaflightOnline)
+     {
+-      auto dt = std::chrono::duration<double>(_simTime - this->lastControllerUpdateTime).count();
+       this->ApplyMotorForces(dt, _ecm);
+-      this->SendState(_ecm);
+     }
++    // SITL only emits a motor packet in response to state, so gating this
++    // makes a dropped link unrecoverable.
++    this->SendState(_ecm);
+   }
+ 
+   this->lastControllerUpdateTime = _simTime;
